@@ -1,0 +1,75 @@
+# Specify the input file path and output file path
+$inputFilePath = "C:\Users\Naveen\Documents\domainepp.xlsx"
+$outputFilePath = "C:\Users\Naveen\Documents\output.xlsx"
+
+# Load the input Excel file
+$inputData = Import-Excel $inputFilePath
+
+# Set your WhoisXML API credentials
+$apiKey = "*****Your API key**********"
+
+# Create an empty array to store the results
+$outputData = @()
+
+# Process each domain in the input file
+foreach ($row in $inputData) {
+# Retrieve the domain from the input data
+$domain = $row.Domain
+
+# Construct the WhoisXML API URL for Whois record
+$url = "https://www.whoisxmlapi.com/whoisserver/WhoisService?apiKey=$apiKey&domainName=$domain"
+
+# Invoke the API and retrieve the Whois record response
+$whoisResponse = Invoke-RestMethod -Uri $url
+
+# Extract the EPP status (Domain Status)
+$domainStatus = $whoisResponse.WhoisRecord.registryData.status -join ", "
+
+# Retrieve SPF records
+$spfRecords = Resolve-DnsName -Type TXT -Name $domain | Where-Object {$_.Strings -like "v=spf1*"}
+$spfRecords = if ($spfRecords) { $spfRecords.Strings } else { "No SPF records found." }
+
+# Retrieve DMARC records
+$dmarcRecords = Resolve-DnsName -Type TXT -Name "_dmarc.$domain" | Where-Object {$_.Strings -like "v=DMARC1*"}
+$dmarcRecords = if ($dmarcRecords) { $dmarcRecords.Strings } else { "No DMARC records found." }
+
+# Extract the registrant information
+$registrantInfo = $whoisResponse.WhoisRecord.registrant
+$registrantOrganization = $registrantInfo.organization
+$registrantName = $registrantInfo.name
+$registrantEmail = $registrantInfo.email
+$registrantPhone = $registrantInfo.telephone
+$registrantFax = $registrantInfo.fax
+$registrantAddress = "$($registrantInfo.street), $($registrantInfo.city), $($registrantInfo.state), $($registrantInfo.postalCode), $($registrantInfo.country)"
+
+# Extract the nameserver information
+$nameservers = ($whoisResponse.WhoisRecord.nameServers.hostNames | ForEach-Object { $_.InnerText }) -join ", "
+
+# Extract the abuse contact information
+$abuseContact = $whoisResponse.WhoisRecord.abuseEmail
+
+# Create a new object with the extracted data
+$outputRow = [PSCustomObject]@{
+Domain = $domain
+"EPP Status (Domain Status)" = $domainStatus
+SPF = $spfRecords
+DMARC = $dmarcRecords
+"Registrant Organization" = $registrantOrganization
+"Registrant Name" = $registrantName
+"Registrant Email" = $registrantEmail
+"Registrant Phone" = $registrantPhone
+"Registrant Fax" = $registrantFax
+"Registrant Address" = $registrantAddress
+"Nameservers" = $nameservers
+"Abuse Contact" = $abuseContact
+}
+
+# Add the row to the output array
+$outputData += $outputRow
+}
+
+# Export the output data to Excel
+$outputData | Export-Excel -Path $outputFilePath -AutoSize -AutoFilter
+
+# Output the completion message
+Write-Host "Output file generated successfully at: $outputFilePath"
