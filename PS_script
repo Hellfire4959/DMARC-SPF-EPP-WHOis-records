@@ -1,6 +1,6 @@
 # Specify the input file path and output file path
-$inputFilePath = "C:\Users\Naveen\Documents\domainepp.xlsx"
-$outputFilePath = "C:\Users\Naveen\Documents\output.xlsx"
+$inputFilePath = "C:\Users\Hellfire\Documents\domainlist.xlsx"
+$outputFilePath = "C:\Users\Hellfire\Documents\output.xlsx"
 
 # Load the input Excel file
 $inputData = Import-Excel $inputFilePath
