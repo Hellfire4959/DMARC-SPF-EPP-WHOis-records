@@ -1,0 +1,422 @@
+# ============================================================
+# SPF / DMARC AUDIT SCRIPT - READS RAW EXCEL COLUMN A
+# No API
+# No WHOIS
+# No DKIM
+# No timeout/retry
+# No sleep/awake
+# Keeps every row from Excel column A
+# Supports Japanese/Korean/IDN domains using punycode
+# ============================================================
+
+$inputFilePath  = "D:\domaintest.xlsx"
+$outputFilePath = "D:\domaintest_spf_dmarc_output.xlsx"
+
+# Set this based on your file
+$domainColumn = 1      # Column A
+$startRow     = 2      # Row 1 is header
+$endRow       = 3543   # Your data ends at row 3543
+
+# ============================================================
+# MODULE CHECK
+# ============================================================
+
+if (-not (Get-Module -ListAvailable -Name ImportExcel)) {
+    Write-Host "ImportExcel module is missing. Installing..." -ForegroundColor Yellow
+    Install-Module ImportExcel -Scope CurrentUser -Force
+}
+
+Import-Module ImportExcel
+
+if (-not (Test-Path $inputFilePath)) {
+    Write-Host "Input file not found: $inputFilePath" -ForegroundColor Red
+    exit
+}
+
+# ============================================================
+# OPEN EXCEL PACKAGE RAW
+# ============================================================
+
+$package = Open-ExcelPackage -Path $inputFilePath
+$worksheet = $package.Workbook.Worksheets[1]
+
+if ($null -eq $worksheet) {
+    Write-Host "No worksheet found in input file." -ForegroundColor Red
+    Close-ExcelPackage $package
+    exit
+}
+
+$totalRows = $endRow - $startRow + 1
+$outputData = @()
+$processed = 0
+
+# ============================================================
+# CLEAN DOMAIN / URL
+# ============================================================
+
+function Get-CleanHost {
+    param (
+        [string]$InputDomain
+    )
+
+    if ([string]::IsNullOrWhiteSpace($InputDomain)) {
+        return $null
+    }
+
+    $clean = $InputDomain.Trim().Normalize([Text.NormalizationForm]::FormKC)
+
+    $clean = $clean -replace "[\u200B-\u200D\uFEFF]", ""
+    $clean = $clean -replace "　", ""
+    $clean = $clean.Trim('"').Trim("'").Trim()
+
+    $clean = $clean -replace "^\s*https?://", ""
+    $clean = $clean -replace "^\s*ftp://", ""
+    $clean = $clean -replace "^\s*mailto:", ""
+
+    if ($clean -match "@") {
+        $clean = ($clean -split "@")[-1]
+    }
+
+    $clean = ($clean -split "[/#?]")[0]
+
+    if ($clean -match "^\[(.+)\]$") {
+        $clean = $matches[1]
+    }
+    else {
+        $clean = ($clean -split ":")[0]
+    }
+
+    $clean = $clean -replace "^www\.", ""
+    $clean = $clean.TrimEnd(".")
+    $clean = $clean.Trim()
+
+    if ([string]::IsNullOrWhiteSpace($clean)) {
+        return $null
+    }
+
+    return $clean
+}
+
+# ============================================================
+# CONVERT IDN TO ASCII / PUNYCODE
+# ============================================================
+
+function Convert-ToAsciiDomain {
+    param (
+        [string]$Domain
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Domain)) {
+        return $null
+    }
+
+    try {
+        $idn = New-Object System.Globalization.IdnMapping
+        $idn.UseStd3AsciiRules = $false
+
+        $asciiDomain = $idn.GetAscii($Domain)
+
+        if ([string]::IsNullOrWhiteSpace($asciiDomain)) {
+            return $null
+        }
+
+        return $asciiDomain.ToLower()
+    }
+    catch {
+        return $null
+    }
+}
+
+# ============================================================
+# BASIC LOOKUP DOMAIN CHECK
+# ============================================================
+
+function Test-LookupDomain {
+    param (
+        [string]$Domain
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Domain)) {
+        return $false
+    }
+
+    if ($Domain -notmatch "\.") {
+        return $false
+    }
+
+    if ($Domain -notmatch "^[a-z0-9.-]+$") {
+        return $false
+    }
+
+    if ($Domain.StartsWith(".") -or $Domain.EndsWith(".")) {
+        return $false
+    }
+
+    if ($Domain -match "\.\.") {
+        return $false
+    }
+
+    return $true
+}
+
+# ============================================================
+# TXT LOOKUP
+# ============================================================
+
+function Get-TxtRecords {
+    param (
+        [string]$Name
+    )
+
+    try {
+        return Resolve-DnsName -Name $Name -Type TXT -ErrorAction Stop
+    }
+    catch {
+        return @()
+    }
+}
+
+# ============================================================
+# CLEAN TXT VALUE
+# ============================================================
+
+function Get-TxtValue {
+    param (
+        $Record
+    )
+
+    if ($Record.Strings) {
+        return ($Record.Strings -join "")
+    }
+    elseif ($Record.Text) {
+        return $Record.Text
+    }
+    elseif ($Record.CharacterStrings) {
+        return ($Record.CharacterStrings -join "")
+    }
+    else {
+        return $null
+    }
+}
+
+# ============================================================
+# PROCESS EXACT EXCEL ROWS
+# ============================================================
+
+for ($excelRow = $startRow; $excelRow -le $endRow; $excelRow++) {
+
+    $processed++
+
+    $originalDomain = [string]$worksheet.Cells[$excelRow, $domainColumn].Text
+
+    Write-Host "[$processed/$totalRows] Excel Row $excelRow Checking: $originalDomain" -ForegroundColor Cyan
+
+    $cleanHost = Get-CleanHost -InputDomain $originalDomain
+    $lookupDomain = Convert-ToAsciiDomain -Domain $cleanHost
+
+    if ([string]::IsNullOrWhiteSpace($cleanHost)) {
+
+        $outputData += [PSCustomObject]@{
+            "Excel_Row"              = $excelRow
+            "Original_Domain"        = $originalDomain
+            "Cleaned_Domain"         = "N/A"
+            "Lookup_Domain_ASCII"    = "N/A"
+            "Audit_Date"             = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+            "SPF_Record"             = "Not Checked"
+            "SPF_Status"             = "Blank Domain"
+            "DMARC_Record"           = "Not Checked"
+            "DMARC_Status"           = "Blank Domain"
+            "Email_Security_Status"  = "Blank Domain"
+        }
+
+        continue
+    }
+
+    if ([string]::IsNullOrWhiteSpace($lookupDomain)) {
+
+        $outputData += [PSCustomObject]@{
+            "Excel_Row"              = $excelRow
+            "Original_Domain"        = $originalDomain
+            "Cleaned_Domain"         = $cleanHost
+            "Lookup_Domain_ASCII"    = "Conversion Failed"
+            "Audit_Date"             = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+            "SPF_Record"             = "Not Checked"
+            "SPF_Status"             = "IDN / ASCII Conversion Failed"
+            "DMARC_Record"           = "Not Checked"
+            "DMARC_Status"           = "IDN / ASCII Conversion Failed"
+            "Email_Security_Status"  = "Domain Conversion Failed"
+        }
+
+        continue
+    }
+
+    if (-not (Test-LookupDomain -Domain $lookupDomain)) {
+
+        $outputData += [PSCustomObject]@{
+            "Excel_Row"              = $excelRow
+            "Original_Domain"        = $originalDomain
+            "Cleaned_Domain"         = $cleanHost
+            "Lookup_Domain_ASCII"    = $lookupDomain
+            "Audit_Date"             = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+            "SPF_Record"             = "Not Checked"
+            "SPF_Status"             = "Invalid Domain Format"
+            "DMARC_Record"           = "Not Checked"
+            "DMARC_Status"           = "Invalid Domain Format"
+            "Email_Security_Status"  = "Invalid Domain Format"
+        }
+
+        continue
+    }
+
+    # ========================================================
+    # SPF LOOKUP
+    # ========================================================
+
+    $rootTxtRecords = Get-TxtRecords -Name $lookupDomain
+
+    $rootTxtValues = (
+        $rootTxtRecords |
+        Where-Object { $_.Type -eq "TXT" } |
+        ForEach-Object {
+            Get-TxtValue -Record $_
+        } |
+        Where-Object { $_ }
+    )
+
+    $spfRecords = (
+        $rootTxtValues |
+        Where-Object { $_ -match '^v=spf1(\s|$)' }
+    )
+
+    $spfRecord = if ($spfRecords) {
+        $spfRecords -join "; "
+    }
+    else {
+        "Missing"
+    }
+
+    $spfStatus = if ($spfRecord -eq "Missing") {
+        "Missing"
+    }
+    elseif ($spfRecords.Count -gt 1) {
+        "Multiple SPF Records Found - Needs Review"
+    }
+    elseif ($spfRecord -match '\-all') {
+        "SPF Present - HardFail"
+    }
+    elseif ($spfRecord -match '~all') {
+        "SPF Present - SoftFail"
+    }
+    elseif ($spfRecord -match '\?all') {
+        "SPF Present - Neutral"
+    }
+    elseif ($spfRecord -match '\+all') {
+        "SPF Present - Pass All - Risky"
+    }
+    else {
+        "SPF Present - Mechanism Not Clearly Identified"
+    }
+
+    # ========================================================
+    # DMARC LOOKUP
+    # ========================================================
+
+    $dmarcLookupName = "_dmarc.$lookupDomain"
+    $dmarcTxtRecords = Get-TxtRecords -Name $dmarcLookupName
+
+    $dmarcTxtValues = (
+        $dmarcTxtRecords |
+        Where-Object { $_.Type -eq "TXT" } |
+        ForEach-Object {
+            Get-TxtValue -Record $_
+        } |
+        Where-Object { $_ }
+    )
+
+    $dmarcRecords = (
+        $dmarcTxtValues |
+        Where-Object { $_ -match '^v=DMARC1' }
+    )
+
+    $dmarcRecord = if ($dmarcRecords) {
+        $dmarcRecords -join "; "
+    }
+    else {
+        "Missing"
+    }
+
+    $dmarcStatus = if ($dmarcRecord -eq "Missing") {
+        "Missing"
+    }
+    elseif ($dmarcRecords.Count -gt 1) {
+        "Multiple DMARC Records Found - Needs Review"
+    }
+    elseif ($dmarcRecord -match 'p=reject') {
+        "DMARC Present - Reject Policy"
+    }
+    elseif ($dmarcRecord -match 'p=quarantine') {
+        "DMARC Present - Quarantine Policy"
+    }
+    elseif ($dmarcRecord -match 'p=none') {
+        "DMARC Present - Monitoring Only"
+    }
+    else {
+        "DMARC Present - Policy Not Clearly Identified"
+    }
+
+    # ========================================================
+    # EMAIL SECURITY STATUS
+    # ========================================================
+
+    $emailSecurityStatus = if ($spfRecord -ne "Missing" -and $dmarcRecord -ne "Missing") {
+        "SPF and DMARC Present"
+    }
+    elseif ($spfRecord -ne "Missing" -and $dmarcRecord -eq "Missing") {
+        "SPF Present - DMARC Missing"
+    }
+    elseif ($spfRecord -eq "Missing" -and $dmarcRecord -ne "Missing") {
+        "DMARC Present - SPF Missing"
+    }
+    else {
+        "SPF and DMARC Missing"
+    }
+
+    $outputData += [PSCustomObject]@{
+        "Excel_Row"              = $excelRow
+        "Original_Domain"        = $originalDomain
+        "Cleaned_Domain"         = $cleanHost
+        "Lookup_Domain_ASCII"    = $lookupDomain
+        "Audit_Date"             = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+        "SPF_Record"             = $spfRecord
+        "SPF_Status"             = $spfStatus
+        "DMARC_Record"           = $dmarcRecord
+        "DMARC_Status"           = $dmarcStatus
+        "Email_Security_Status"  = $emailSecurityStatus
+    }
+}
+
+# ============================================================
+# CLOSE INPUT EXCEL PACKAGE
+# ============================================================
+
+Close-ExcelPackage $package
+
+# ============================================================
+# EXPORT TO EXCEL
+# ============================================================
+
+$outputData | Export-Excel `
+    -Path $outputFilePath `
+    -AutoSize `
+    -AutoFilter `
+    -FreezeTopRow `
+    -BoldTopRow `
+    -WorksheetName "SPF DMARC Audit" `
+    -ClearSheet
+
+Write-Host "============================================================" -ForegroundColor Green
+Write-Host "SPF/DMARC audit completed." -ForegroundColor Green
+Write-Host "Expected Rows : $totalRows" -ForegroundColor Green
+Write-Host "Output Rows   : $($outputData.Count)" -ForegroundColor Green
+Write-Host "Output File   : $outputFilePath" -ForegroundColor Green
+Write-Host "============================================================" -ForegroundColor Green
