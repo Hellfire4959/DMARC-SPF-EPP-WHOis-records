@@ -3,34 +3,34 @@
 # No API
 # No WHOIS
 # No DKIM
-# No timeout/retry
+# Uses the operating system DNS resolver; no custom timeout/retry
 # No sleep/awake
 # Keeps every row from Excel column A
 # Supports Japanese/Korean/IDN domains using punycode
 # ============================================================
 
-$inputFilePath  = "D:\domaintest.xlsx"
-$outputFilePath = "D:\domaintest_spf_dmarc_output.xlsx"
+[CmdletBinding()]
+param (
+    [Parameter(Mandatory)][string]$InputPath,
+    [Parameter(Mandatory)][string]$OutputPath,
+    [ValidateRange(1,16384)][int]$DomainColumn = 1,
+    [ValidateRange(1,1048576)][int]$StartRow = 2,
+    [ValidateRange(0,1048576)][int]$EndRow = 0
+)
 
-# Set this based on your file
-$domainColumn = 1      # Column A
-$startRow     = 2      # Row 1 is header
-$endRow       = 3543   # Your data ends at row 3543
-
-# ============================================================
-# MODULE CHECK
-# ============================================================
+$inputFilePath = $InputPath
+$outputFilePath = $OutputPath
 
 if (-not (Get-Module -ListAvailable -Name ImportExcel)) {
-    Write-Host "ImportExcel module is missing. Installing..." -ForegroundColor Yellow
-    Install-Module ImportExcel -Scope CurrentUser -Force
+    throw 'ImportExcel is required. Run: Install-Module ImportExcel -Scope CurrentUser'
 }
-
-Import-Module ImportExcel
-
-if (-not (Test-Path $inputFilePath)) {
-    Write-Host "Input file not found: $inputFilePath" -ForegroundColor Red
-    exit
+Import-Module ImportExcel -ErrorAction Stop
+$null = Get-Command Resolve-DnsName -ErrorAction Stop
+if (-not (Test-Path -LiteralPath $InputPath -PathType Leaf)) {
+    throw "Input workbook not found: $InputPath"
+}
+if ([IO.Path]::GetFullPath($InputPath) -eq [IO.Path]::GetFullPath($OutputPath)) {
+    throw 'Input and output paths must be different.'
 }
 
 # ============================================================
@@ -43,9 +43,18 @@ $worksheet = $package.Workbook.Worksheets[1]
 if ($null -eq $worksheet) {
     Write-Host "No worksheet found in input file." -ForegroundColor Red
     Close-ExcelPackage $package
-    exit
+    throw 'The first worksheet is empty or unavailable.'
 }
 
+if ($null -eq $worksheet.Dimension) {
+    Close-ExcelPackage $package
+    throw 'The first worksheet has no cells.'
+}
+if ($EndRow -eq 0) { $EndRow = $worksheet.Dimension.End.Row }
+if ($EndRow -lt $StartRow) {
+    Close-ExcelPackage $package
+    throw 'EndRow must be at least StartRow; confirm the workbook contains data.'
+}
 $totalRows = $endRow - $startRow + 1
 $outputData = @()
 $processed = 0
@@ -351,13 +360,13 @@ for ($excelRow = $startRow; $excelRow -le $endRow; $excelRow++) {
     elseif ($dmarcRecords.Count -gt 1) {
         "Multiple DMARC Records Found - Needs Review"
     }
-    elseif ($dmarcRecord -match 'p=reject') {
+    elseif ($dmarcRecord -match '(?:^|;)\s*p\s*=\s*reject\s*(?:;|$)') {
         "DMARC Present - Reject Policy"
     }
-    elseif ($dmarcRecord -match 'p=quarantine') {
+    elseif ($dmarcRecord -match '(?:^|;)\s*p\s*=\s*quarantine\s*(?:;|$)') {
         "DMARC Present - Quarantine Policy"
     }
-    elseif ($dmarcRecord -match 'p=none') {
+    elseif ($dmarcRecord -match '(?:^|;)\s*p\s*=\s*none\s*(?:;|$)') {
         "DMARC Present - Monitoring Only"
     }
     else {

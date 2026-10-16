@@ -1,105 +1,58 @@
-# DMARC-SPF-EPP-WHOis-records
-PowerShell script to extract **DMARC**, **SPF**, **EPP**, and **WHOIS** records for a given domain using free APIs and local DNS queries.
-This repository is designed for **email security audits**, **domain intelligence gathering**, and **defensive security assessments**.
----
+# Domain DNS and WHOIS inventory
 
-## 📌 Features
+Two PowerShell workflows export domain information from an Excel workbook. Choose DNS-only mode for SPF/DMARC presence and policy checks, or API mode for WHOIS/EPP and registrant enrichment alongside DNS records.
 
-- ✅ Extract DMARC records
-- ✅ Extract SPF records
-- ✅ Retrieve WHOIS information
-- ✅ Retrieve EPP domain status
-- ✅ Uses **free APIs**
-- ✅ Supports **local DNS queries**
-- ✅ Suitable for security engineers and SOC teams
+| Script | Inputs | External dependency |
+| --- | --- | --- |
+| [Invoke-DnsAudit.ps1](scripts/Invoke-DnsAudit.ps1) | Domain values in a chosen worksheet column and row range | Configured DNS resolver; no API key |
+| [Invoke-WhoisDnsAudit.ps1](scripts/Invoke-WhoisDnsAudit.ps1) | First worksheet with a `Domain` column | WhoisXML API account/key and DNS resolver |
 
-## 🔧 Prerequisites
+## Requirements
 
-- Windows PowerShell **5.1+** or **PowerShell 7+**
-- Internet connectivity
-- A **free API key** from one of the following providers:
-  - https://www.whoxy.com/
-  - https://main.whoisxmlapi.com/
----
+- Windows with PowerShell and the `Resolve-DnsName` cmdlet. These scripts are not cross-platform DNS tools.
+- The [ImportExcel module](https://github.com/dfinke/ImportExcel). Microsoft Excel itself is not required.
+- An existing output directory and a different output workbook path from the input.
 
-## 🔑 API Key Setup
-
-1. Register for a **free account** using one of the links above.
-2. Generate your **API key**.
-3. Open the PowerShell script (`.ps1` file).
-4. Replace the placeholder value:
 ```powershell
-$ApiKey = "REPLACE_WITH_YOUR_API_KEY"
-````
-
-> ⚠️ Do **not** commit real API keys to public repositories.
-
-***
-## 📦 Required PowerShell Modules
-
-Ensure required modules are installed:
-```powershell
-Install-Module -Name DnsClient -Scope CurrentUser
+git clone https://github.com/Hellfire4959/DMARC-SPF-EPP-WHOis-records.git
+Set-Location DMARC-SPF-EPP-WHOis-records
+Install-Module ImportExcel -Scope CurrentUser
+New-Item -ItemType Directory -Force output
 ```
 
-If prompted, allow installations from PSGallery.
+The scripts check prerequisites and do not install modules automatically.
 
-***
+## DNS-only mode
 
-## ▶️ Usage
-1.  Open PowerShell
-2.  Navigate to the script directory:
+Put domains in column A, with a header in row 1. Run:
 
 ```powershell
-cd path\to\PS_script
+.\scripts\Invoke-DnsAudit.ps1 -InputPath .\domains.xlsx -OutputPath .\output\dns-audit.xlsx
 ```
-3.  Run the script:
+
+Defaults: first worksheet, column 1, starting at row 2 through the last used row. To choose a range:
 
 ```powershell
-.\DMARC_SPF_WHOIS.ps1
+.\scripts\Invoke-DnsAudit.ps1 -InputPath .\domains.xlsx -OutputPath .\output\dns-audit.xlsx -DomainColumn 2 -StartRow 2 -EndRow 100
 ```
 
-4.  Enter the domain name when prompted.
+This mode preserves each selected row, normalizes common URL/email-like inputs, converts internationalized domain names to ASCII, and exports the original input, cleaned lookup name, timestamp, TXT records and summary statuses. The output worksheet is `SPF DMARC Audit`. Its content is replaced on a repeated run.
 
-***
+SPF/DMARC labels are basic record-presence and policy-string checks, not full RFC validation. Resolver failures currently produce empty lookup results, so a reported missing record needs confirmation before a configuration decision. The script uses operating-system DNS behavior without custom retry or timeout settings. It does not retrieve DKIM, WHOIS or EPP data.
 
-## 📄 Output
+## WHOIS + DNS mode
 
-The script returns:
+The first worksheet needs a column named **Domain**. Supply your key through the process environment or the `-ApiKey` parameter:
 
-*   DMARC policy and reporting details
-*   SPF record validation
-*   WHOIS domain registration data
-*   EPP domain status codes
-*   Clean, readable console output
+```powershell
+# Set WHOISXML_API_KEY in your shell or secret manager first.
+.\scripts\Invoke-WhoisDnsAudit.ps1 -InputPath .\domains.xlsx -OutputPath .\output\whois-audit.xlsx
+```
 
-***
+Each nonblank domain produces an API request. The output includes domain/EPP status, SPF/DMARC values, registrant fields, nameservers and abuse-contact information when the provider supplies them. Blank domains are skipped. API errors stop the run; this mode does not implement retries or per-row API-error output. DNS failures can appear as missing records in this legacy workflow. API availability, credits and redacted registration data affect completeness.
 
-## 🛡️ Use Cases
+The original extensionless files `Free script using local DNS` and `PS_script` now live under `scripts/` with `.ps1` extensions and explicit path parameters.
 
-*   Email security posture reviews
-*   DMARC/SPF misconfiguration checks
-*   Phishing readiness assessments
-*   Domain reconnaissance
-*   Blue Team / SOC investigations
+## Validation and contributions
 
-***
-
-## ⚠️ Disclaimer
-
-This script is intended **for authorized security assessments only**.  
-Use it **only on domains you own or have explicit permission to test**.
-
-The author assumes **no liability** for misuse.
-
-***
-## 🤝 Contributing
-Contributions are welcome!
-1.  Fork the repository
-2.  Create a feature branch
-3.  Submit a pull request
-4.  Add documentation for any changes
-***
-## 📜 License
-This project is provided **as-is**, without warranty of any kind.
-
+GitHub Actions parses both scripts on Windows to catch syntax errors. This is syntax validation, not a live DNS/Excel/WhoisXML integration test. A full run requires Windows, ImportExcel, a representative workbook, and API access for WHOIS mode. Include sanitized input and expected output when proposing changes.
